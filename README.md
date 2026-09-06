@@ -1,4 +1,4 @@
-# PingExporter
+# PingExporrter
 
 Self-built Prometheus ICMP ping exporter — a drop-in replacement for [`czerwonk/ping_exporter`](https://github.com/czerwonk/ping_exporter): same `config.yml` format, same port (`9427`), same metric names/labels, no changes needed to an existing compose file beyond the `image:` line. Built to close it out as a dependency on an unmaintained third-party image while keeping every existing Prometheus scrape config and Grafana panel working unchanged — see [PING_EXPORTER_REQUIREMENTS.md](./PING_EXPORTER_REQUIREMENTS.md) for the full background and acceptance criteria this was built against.
 
