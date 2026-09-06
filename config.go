@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // Config mirrors czerwonk/ping_exporter's config.yml schema exactly (targets,
