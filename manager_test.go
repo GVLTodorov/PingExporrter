@@ -250,6 +250,35 @@ func TestReconcileStartsAndStopsProbers(t *testing.T) {
 	}
 }
 
+// TestStopAllStopsHostnameRefreshLoop guards against a real leak: Start
+// spawns one refreshLoop goroutine per hostname target with no way to stop
+// it, so it (and, worse, any prober it resurrects via reconcile) outlived
+// stopAll and every other test in the package. The whole-package goleak
+// check in TestMain would only ever surface that at the very end of the
+// test binary, blamed on whatever test happened to run last — so this test
+// also does its own scoped check via goleak.Find, with retry, so a
+// regression is reported here and can't race a concurrently-running test.
+func TestStopAllStopsHostnameRefreshLoop(t *testing.T) {
+	cfg := testConfig()
+	cfg.Targets = []string{"dyn.example.com"}
+	cfg.DNS.Refresh = Duration(time.Millisecond) // fire immediately so the loop is definitely running
+	m := newManager(cfg, &stubPinger{})
+	m.lookup = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}}, nil
+	}
+
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond) // let refreshLoop tick a few times
+
+	m.stopAll()
+
+	if err := goleak.Find(); err != nil {
+		t.Errorf("goroutine(s) still running after stopAll: %v", err)
+	}
+}
+
 func TestReconcileDoesNotTouchOtherTargets(t *testing.T) {
 	m := newManager(testConfig(), &stubPinger{})
 	t.Cleanup(m.stopAll)

@@ -75,15 +75,23 @@ type manager struct {
 
 	mu      sync.Mutex
 	probers map[proberKey]*prober
+
+	// refreshCancel stops every refreshLoop goroutine started by Start;
+	// refreshWG lets stopAll block until they've actually exited, the same
+	// way stopProber blocks on a prober's done channel. Defaults to a no-op
+	// so stopAll is safe to call on a manager whose Start was never called.
+	refreshCancel context.CancelFunc
+	refreshWG     sync.WaitGroup
 }
 
 func newManager(cfg Config, eng pinger) *manager {
 	resolver := newDNSResolver(cfg.DNS.Nameserver)
 	return &manager{
-		cfg:     cfg,
-		eng:     eng,
-		lookup:  resolver.LookupIPAddr,
-		probers: make(map[proberKey]*prober),
+		cfg:           cfg,
+		eng:           eng,
+		lookup:        resolver.LookupIPAddr,
+		probers:       make(map[proberKey]*prober),
+		refreshCancel: func() {},
 	}
 }
 
@@ -112,6 +120,9 @@ func newDNSResolver(nameserver string) *net.Resolver {
 // targets additionally get a background goroutine that re-resolves every
 // dns.refresh and reconciles the prober set.
 func (m *manager) Start(ctx context.Context) error {
+	refreshCtx, cancel := context.WithCancel(ctx)
+	m.refreshCancel = cancel
+
 	for _, target := range m.cfg.Targets {
 		resolveCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		ips, err := m.resolveTarget(resolveCtx, target)
@@ -125,7 +136,8 @@ func (m *manager) Start(ctx context.Context) error {
 		}
 
 		if net.ParseIP(target) == nil {
-			go m.refreshLoop(target)
+			m.refreshWG.Add(1)
+			go m.refreshLoop(refreshCtx, target)
 		}
 	}
 	return nil
@@ -209,10 +221,18 @@ func (m *manager) stopProber(key proberKey) {
 	}
 }
 
-// stopAll cancels every running prober and clears their metrics series. The
-// running process never needs this itself (exiting reclaims everything),
-// but tests use it to leave no goroutines behind between cases.
+// stopAll cancels every running refreshLoop and prober and clears the
+// probers' metrics series. The running process never needs this itself
+// (exiting reclaims everything), but tests use it to leave no goroutines
+// behind between cases.
+//
+// refreshLoop is stopped (and waited on) first: otherwise a refresh tick
+// racing this call could reconcile a stopped target back in, starting a
+// fresh prober after stopAll has already collected the set to stop.
 func (m *manager) stopAll() {
+	m.refreshCancel()
+	m.refreshWG.Wait()
+
 	m.mu.Lock()
 	keys := make([]proberKey, 0, len(m.probers))
 	for k := range m.probers {
@@ -225,20 +245,27 @@ func (m *manager) stopAll() {
 	}
 }
 
-func (m *manager) refreshLoop(target string) {
+func (m *manager) refreshLoop(ctx context.Context, target string) {
+	defer m.refreshWG.Done()
+
 	interval := m.cfg.DNS.Refresh.Duration()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		ctx, cancel := context.WithTimeout(context.Background(), interval)
-		ips, err := m.resolveTarget(ctx, target)
-		cancel()
-		if err != nil {
-			log.Printf("re-resolving %q: %v (keeping previous addresses)", target, err)
-			continue
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			resolveCtx, cancel := context.WithTimeout(ctx, interval)
+			ips, err := m.resolveTarget(resolveCtx, target)
+			cancel()
+			if err != nil {
+				log.Printf("re-resolving %q: %v (keeping previous addresses)", target, err)
+				continue
+			}
+			m.reconcile(target, ips)
 		}
-		m.reconcile(target, ips)
 	}
 }
 
