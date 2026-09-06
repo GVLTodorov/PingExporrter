@@ -1,0 +1,5 @@
+ping-exporter
+ping-exporter.exe
+*.test
+*.out
+.env
